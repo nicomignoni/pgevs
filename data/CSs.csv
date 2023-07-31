@@ -1,0 +1,5 @@
+css_type,max_output_power
+slow,7
+medium,22
+fast,44
+ultrafast,100
