@@ -1,0 +1,21 @@
+title = "Population Games for PEV Recharging"
+
+maxRandomSeed = 2023
+maxNumChargingStations = 10
+minNumChargingStations = 1
+pevsDataframeColumns = ["Car full name", "Battery capacity [kWh]",  "Maximum DC charging power [kW]"]
+
+# Charging station outputs from https://www.virta.global/blog/ev-charging-and-basics-of-electricity
+chargingColumnsOutputPower.slow.description = "Slow charging (DC, 7 kW)"
+chargingColumnsOutputPower.slow.value = 7
+
+chargingColumnsOutputPower.medium.description = "Medium charging (DC, 22 kW)"
+chargingColumnsOutputPower.medium.value = 22
+
+chargingColumnsOutputPower.fast.description = "Fast charging (DC, 43 kW)"
+chargingColumnsOutputPower.fast.value = 43
+
+chargingColumnsOutputPower.ultrafast.description = "Ultra fast charging (DC, 100 kW)"
+chargingColumnsOutputPower.ultrafast.value = 100
+
+maxInitialBatteryFraction = 0.5
