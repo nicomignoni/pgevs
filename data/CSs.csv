@@ -1,5 +1,5 @@
-css_type,max_output_power
-slow,7
-medium,22
-fast,44
-ultrafast,100
+kind,max_output,power
+slow,7.0,0
+medium,22.0,0
+fast,44.0,0
+ultrafast,100.0,0
