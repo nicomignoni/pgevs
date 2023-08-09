@@ -1,187 +1,233 @@
+#%% Packages
+import tomllib
 from datetime import datetime
-from itertools import count
 
 import numpy as np
 import pandas as pd
-import scipy as sp
 
 import matplotlib.pyplot as plt
 
 np.random.seed(2023)
 
-SECONDS_IN_HOUR = 3600
-
-# Figure settings
-FIG_WIDTH = 3.5  
-LATEX_PREAMBLE = [
-    r'\usepackage{amsfonts}',
-    r'\usepackage{amssymb}',
-    r'\usepackage{amsmath}',
-]
-
-plt.rcParams.update({
-    "grid.alpha": 0.5,
-    "axes.spines.right": False,
-    "axes.spines.top": False,
-    "legend.frameon": False,
-    "ytick.labelsize": 6,
-    "xtick.labelsize": 6,
-    "font.size": 8,
-    "font.family": "sans",
-    "font.sans-serif": ["Computer Modern Roman"],
-    "text.usetex": True,
-    "text.latex.preamble": "".join(LATEX_PREAMBLE)
-})
-
-# Dynamics 
+#%% Utilities
 def efficiency(x): 
-    return params["gamma"] * np.tanh(params["max_soc"] * params["sigma"] - x[SOC_INDICES]) +\
-           params["eta"] - params["gamma"]
-def degradation(x): return params["mu"] * x[POWER_INDICES]
-def energy_cost(x): return params["lambda"] * x[POWER_INDICES[:-1]].sum()
-def charge_level(x): # 0 / 0 -> 0
-    return np.divide(
-        params["max_soc"] - x[SOC_INDICES],
-        params["max_soc"], 
-        out=np.zeros_like(x[SOC_INDICES]), 
-        where=params["max_soc"]!=0
-    )
+    return x["gamma"]*np.tanh(x["max_soc"]*x["sigma"] - x["epsilon"]*x["soc"]) + x["eta"] - x["gamma"]
 
+def degradation(x): 
+    return x["mu"] * x["power"]
+
+def energy_cost(x): 
+    return s["energy_price"] * x["power"][:ret_i].sum()
+
+def emptyness(x): # 0 / 0 -> 0
+    return np.divide(x["max_soc"] - x["soc"], x["max_soc"], out=np.zeros(num_agents), where=x["max_soc"] > 0)
+
+# Events and handlers
+def after_departures(x): 
+    has_departed = np.random.uniform(size=num_agents) <= s["dep_prob"]
+    for field in ("soc", "max_soc", "max_power", "is_active"): x[field] *= ~has_departed
+    return x
+
+def after_charge_optim(x):
+    x["is_active"][:ret_i] = np.logical_and(x["max_soc"][:ret_i] > 0, x["soc"][:ret_i] <= x["max_soc"][:ret_i])
+    realloc_power = np.sum(x["power"] * (1 - x["is_active"]))
+    realloc_order = np.argsort(precedence(x))[::-1]
+    max_power_increase = x["is_active"] * (x["max_power"] - x["power"])
+    cum_power_increase = np.cumsum(max_power_increase[realloc_order])
+    full_increase_evs = cum_power_increase <= realloc_power
+    first_non_full_ev = np.argmin(full_increase_evs)
+    x["power"][realloc_order] += full_increase_evs * max_power_increase[realloc_order]
+    x["power"][realloc_order[first_non_full_ev]] += realloc_power - max_power_increase[realloc_order[:first_non_full_ev]].sum()
+    x["power"] *= x["is_active"]
+    return x
+    
+def after_charge_simple(x):
+    x["is_active"][:ret_i] = np.logical_and(x["max_soc"][:ret_i] > 0, x["soc"][:ret_i] <= x["max_soc"][:ret_i])
+    x["power"][ret_i] += np.sum(x["power"][:ret_i] * (1 - x["is_active"][:ret_i]))
+    x["power"] *= x["is_active"]
+    return x
+
+def after_arrivals(x):
+    has_arrived = np.logical_and(x["is_active"] == 0, np.random.uniform(size=num_agents) <= s["arr_prob"])
+    num_arrived_evs = np.count_nonzero(has_arrived)
+    if num_arrived_evs >= 1:
+        new_evs = evs_df.sample(num_arrived_evs, replace=True, ignore_index=True).to_records(index=False)
+        for field in new_evs.dtype.names:
+            x[field][has_arrived] = new_evs[field]
+        x["max_power"] = np.minimum(x["max_input"], x["max_output"])
+    return x
+
+# Fitness and revision
 def precedence(x): 
-    return params["alpha"]       * charge_level(x) -\
-           (1 - params["alpha"]) * (degradation(x) + energy_cost(x))
+    return x["alpha"] * emptyness(x) 
 
 def rho(x):
     g = precedence(x) 
-    return x[IS_ACTIVE_INDICES] * x[IS_ACTIVE_INDICES, None]*\
-           np.maximum(0, params["max_net_power"][:,None] - x[POWER_INDICES,None])*\
+    return x["is_active"] * x["is_active"][:,None] * np.maximum(0, x["max_power"][:,None] - x["power"][:,None])*\
            np.maximum(0, g[:,None] - g)
 
-        
-def dx(t, x): # Parameters are taken as globals
-    r = x[POWER_INDICES] * rho(x)
-    return np.hstack([
-        np.sum(r,1) - np.sum(r,0), # power dynamics
-        efficiency(x) * x[POWER_INDICES], # state-of-charge dynamics
-        np.zeros(NUM_AGENTS) # is_active dynamics, i.e. trivially null
-    ])
+# Dynamics
+def dynamic_eg(x): 
+    """Jump dynamic"""
+    # x = after_departures(x)
+    x = after_charge_optim(x)
+    # x = after_arrivals(x)
 
-# System settings
-NUM_CHARGING_STATION = 20
-NUM_AGENTS = NUM_CHARGING_STATION + 1
+    """Flow dynamic"""
+    r = x["power"] * rho(x)
+    x["power"] += (np.sum(r,1) - np.sum(r,0)) * s["step_size"] 
+    x["soc"] += (efficiency(x) * x["power"]) * s["step_size"] 
+    return x
 
-INIT_SOC_FRAC = 0.5
-AVAILABILITY = 200
+def dynamic_tr(x):
+    """Jump dynamic"""
+    # x = after_departures(x)
+    x = after_charge_simple(x)
+    # x = after_arrivals(x)
 
-MIN_ETA = 0.98
-MIN_ALPHA, MAX_ALPHA = 0.8, 1
-MIN_SIGMA, MAX_SIGMA = 0.1, 0.9
-MIN_GAMMA, MAX_GAMMA = 0.05, 0.15
-MIN_EPSIL, MAX_EPSIL = 0.1, 0.2
-MIN_MU, MAX_MU = 0.01, 0.5
-MIN_LAMBDA, MAX_LAMBDA = 0.01, 0.05
+    uniform_allocation = np.divide(s["avail"], 
+        x["is_active"][:ret_i].sum(),
+        where=x["is_active"][:ret_i]==1,
+        out=np.zeros(s["num_cs"])
+    ) 
+    x["power"][ret_i] = 0
+    x["power"][:ret_i] = np.minimum(uniform_allocation, x["max_power"][:ret_i])
+    x["power"][ret_i] = s["avail"] - x["power"][:ret_i].sum()
+    x["soc"] += (efficiency(x) * x["power"]) * s["step_size"] 
+    return x
 
-# Load data and add alpha and efficiency columns for the EVs data
-EVS_DF = pd.read_csv("data/EVs.csv")
-CSS_DF = pd.read_csv("data/CSs.csv")
-# EVS_DF["max_soc"] *= SECONDS_IN_HOUR # kWh -> kWs 
 
-# Simulation settings
-T_BOUND = 100
-MIN_STEP = MAX_STEP = 1e-3
-ABS_TOL = REL_TOL = 1e-6
+#%% Figure and system settings
+with open("matplotlib.toml", "rb") as file: plts = tomllib.load(file)
+with open("params.toml", "rb") as file: s = tomllib.load(file)
+plts["rcParams"]["text.latex.preamble"] = "".join(plts["latex_preamble"])
+plt.rcParams.update(**plts["rcParams"])
 
-# Variables indexing
-RETAILER_POWER_INDEX = NUM_CHARGING_STATION
-POWER_INDICES        = np.arange(NUM_AGENTS)
-SOC_INDICES          = np.arange(NUM_AGENTS, 2*NUM_AGENTS)
-IS_ACTIVE_INDICES    = np.arange(2*NUM_AGENTS, 3*NUM_AGENTS) 
+num_agents = s["num_cs"] + 1
+num_steps = int(s["t_bound"] / s["step_size"])
+ret_i = s["num_cs"]
 
-# Sample CSs and PEVs, add necessary columns, and create paramteres
-params_df = pd.concat((
-        EVS_DF.sample(NUM_CHARGING_STATION, replace=True, ignore_index=True),
-        CSS_DF.sample(NUM_CHARGING_STATION, replace=True, ignore_index=True),
-        pd.DataFrame({
-            "alpha": np.random.uniform(MIN_ALPHA, MAX_ALPHA, size=NUM_CHARGING_STATION), 
-            "eta": np.random.uniform(low=MIN_ETA, size=NUM_CHARGING_STATION),
-            "sigma": np.random.uniform(MIN_SIGMA, MAX_SIGMA, size=NUM_CHARGING_STATION),
-            "gamma": np.random.uniform(MIN_GAMMA, MAX_GAMMA, size=NUM_CHARGING_STATION),
-            "epsil": np.random.uniform(MIN_EPSIL, MAX_EPSIL, size=NUM_CHARGING_STATION),
-            "mu": np.random.uniform(MIN_MU, MAX_MU, size=NUM_CHARGING_STATION),
-            "lambda": np.random.uniform(MIN_LAMBDA, MAX_LAMBDA) * np.ones(NUM_CHARGING_STATION)
-        })
-    ),
+# CSs data are invariant with respect to any dynamic
+css_df = pd.read_csv("../data/CSs.csv", usecols=lambda x: x != "kind")
+evs_df = pd.read_csv("../data/EVs.csv", usecols=lambda x: x != "name")
+x_df = pd.concat([
+    css_df.sample(s["num_cs"], replace=True, ignore_index=True), 
+    evs_df.sample(s["num_cs"], replace=True, ignore_index=True)], 
     axis=1
 )
-params_df = pd.concat((
-    params_df, 
-    pd.DataFrame({
-        "ev_name": ["Empty"], "max_input_power": [np.inf], "max_soc": [0], "alpha": [0], "css_type": ["Retailer"], 
-        "max_output_power": [AVAILABILITY], "eta": [0], "sigma": [0], "gamma": [0], "mu": [0], "lambda": [0], "epsil": [0]
-        }),
-    )
-)
-params_df["max_net_power"] = params_df[["max_input_power", "max_output_power"]].min(axis=1)
 
-params = np.array(params_df.to_records(index=False))
+# Add retailer row
+x_df.loc[ret_i] = np.zeros(x_df.shape[1])
+x_df.loc[ret_i, ("max_output", "max_input")] = s["avail"]
+x_df.loc[ret_i, "is_active"] = 1
+
+# Add max power 
+x_df["max_power"] = np.minimum(x_df["max_input"].values, x_df["max_output"].values)
 
 # Initial values
-init_x = np.hstack([
-    np.hstack([np.zeros(NUM_CHARGING_STATION), AVAILABILITY]), # init power
-    INIT_SOC_FRAC * params["max_soc"] * np.random.rand(NUM_AGENTS), # init_soc
-    (params["max_soc"] > 0) # init is_active
-])
-init_x[-1] = 1 # the retailer is always active
+init_x = np.array(x_df.to_records(index=False))
+init_power_alloc = np.divide(
+    s["avail"], 
+    init_x["is_active"][:ret_i].sum(),
+    where=init_x["is_active"][:ret_i]==1,
+    out=np.zeros(s["num_cs"])
+) 
+init_x["soc"] = s["init_soc_frac"] * init_x["max_soc"] * np.random.rand(num_agents)
+init_x["power"][:ret_i] = np.minimum(init_power_alloc, init_x["max_power"][:ret_i])
+init_x["power"][ret_i] = 0
 
-# System loop
-counter = count()
-num_steps = int(T_BOUND / MIN_STEP)
-y = np.zeros((num_steps, init_x.size), dtype=np.float16)
-t = np.zeros((num_steps,), dtype=np.float16)
+# Evolutionary dynamic block
+x_eg = np.zeros([num_steps, num_agents], dtype=init_x.dtype)
+x_eg[:][0,:] = init_x
 
-system = sp.integrate.RK23(
-    dx, y0=init_x, t0=0, t_bound=T_BOUND, first_step=MIN_STEP, 
-    max_step=MAX_STEP, rtol=REL_TOL, atol=ABS_TOL
-)
-n = next(counter)
-while system.status != "finished" and n < t.size:
-    system.step()
-    y[n,:] = system.y
-    t[n] = system.t
+# Trivial dynamic block
+x_tr = np.zeros([num_steps, num_agents], dtype=init_x.dtype)
+x_tr[:][0,:] = init_x
 
-    # Jumps
-    system.y[IS_ACTIVE_INDICES] = (system.y[SOC_INDICES] <= params["max_soc"])
-    system.y[RETAILER_POWER_INDEX] += np.sum(system.y[POWER_INDICES] * (1 - system.y[IS_ACTIVE_INDICES]))
-    system.y[POWER_INDICES] *= system.y[IS_ACTIVE_INDICES]
 
-    n = next(counter)
+#%% System loop
+t = s["step_size"] * np.arange(num_steps)
+for k in range(1,num_steps):
+    x_eg[:][k,:] = dynamic_eg(x_eg[:][k-1,:])
+    x_tr[:][k,:] = dynamic_tr(x_tr[:][k-1,:])
 
 # Save results
 # timestamp = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
-np.save(f"results/output.npy", y)
-np.save(f"results/time.npy", t)
+np.save("../results/output_eg.npy", x_eg)
+np.save("../results/output_tr.npy", x_tr)
+np.save("../results/time.npy", t)
 
-# Plotting
-fig, axs = plt.subplots(5, 1, figsize=(FIG_WIDTH, 1.8*FIG_WIDTH), sharex=True)
-axs[-1].set_xlabel("Time (s)")
-
-for i,(indices, y_label) in enumerate((
-    (POWER_INDICES[:-1], "$p_i(t)$ [kW]"), (SOC_INDICES, "$b_i(t)$ [kWh]"), (IS_ACTIVE_INDICES, "$s_i(t)$"))
-):
-    axs[i].plot(t, y[:,indices], color="#333333", linewidth=0.5)
+# Power and SoC plotting (eg, debugging)
+fig, axs = plt.subplots(2, 1, figsize=(plts["fig_width"], 1.5*plts["fig_width"]), sharex=True)
+for i,(field, y_label) in enumerate([("power", "$p_i(t)$ [kW]"), ("soc", "$b_i(t)$ [kWh]")]):
+    axs[i].plot(t, x_eg[field][:,:ret_i], color="k", linewidth=0.3)
     axs[i].set_ylabel(y_label)
     axs[i].grid(alpha=0.2)
+axs[-1].set_xlabel("Time (h)")
+plt.show(block=False)
 
-# Availability
-axs[3].axhline(AVAILABILITY, linestyle="--", color="tab:red", linewidth=0.5, label="$A$")
-axs[3].plot(t, y[:,RETAILER_POWER_INDEX], color="tab:blue", linewidth=0.5, label="$p_ell(t)$")
-axs[3].plot(t, y[:,POWER_INDICES].sum(1), color="#333333", linewidth=0.5, label="$\sum_{i \in \mathcal{C}} p_i(t)$")
-axs[3].set_ylabel("[kW]")
-axs[3].grid(alpha=0.2)
+fig, axs = plt.subplots(2, 1, figsize=(plts["fig_width"], plts["fig_width"]), sharex=True)
+for i,(field, y_label) in enumerate([("power", "$p_i(t)$ [kW]"), ("soc", "$b_i(t)$ [kWh]")]):
+    axs[i].plot(t, x_tr[field][:,:ret_i], color="k", linewidth=0.3)
+    axs[i].set_ylabel(y_label)
+    axs[i].grid(alpha=0.2)
+axs[-1].set_xlabel("Time (h)")
+plt.show(block=False)
 
-axs[4].plot(t, np.apply_along_axis(precedence, 1, y), color="#333333", linewidth=0.5)
-axs[4].set_ylabel(r"$g_i(t)$")
-axs[4].grid(alpha=0.2)
 
+#%% Plotting
+# Collective charging
+fig, ax = plt.subplots(figsize=(plts["fig_width"], 0.5*plts["fig_width"]))
+ax.plot(t, 
+    np.linalg.norm(x_eg["max_soc"] - x_eg["soc"], axis=1)**2 /\
+    np.linalg.norm(x_eg["max_soc"] - x_eg["soc"][0,:], axis=1)**2,
+    label=r"$\displaystyle \frac{\left\| \overline{\mathbf{b}} - \mathbf{b}(t) \right\|^2}" +\
+          r"{\left\| \overline{\mathbf{b}} - \mathbf{b}(0) \right\|^2}$"
+)
+ax.plot(t, 
+    np.linalg.norm(x_tr["max_soc"] - x_tr["soc"], axis=1)**2 /\
+    np.linalg.norm(x_tr["max_soc"] - x_tr["soc"][0,:], axis=1)**2,
+    label=r"$\displaystyle \frac{\left\| \overline{\mathbf{b}}^\dagger - \mathbf{b}^\dagger(t) \right\|^2}" +\
+          r"{\left\| \overline{\mathbf{b}}^\dagger - \mathbf{b}^\dagger(0) \right\|^2}$"
+)
+ax.set_xlabel("Time [h]")
+ax.grid(alpha=0.2)
+ax.legend()
 plt.tight_layout()
+plt.savefig("../fig/charging.pdf", bbox_inches="tight")
 plt.show(block=False) 
+ 
+# Precedence function
+fig, ax = plt.subplots(figsize=(plts["fig_width"], 0.5*plts["fig_width"]))
+ax.plot(t, np.apply_along_axis(precedence, 1, x_eg).std(axis=1), label=r"$\text{std}\{\mathbf{g}(t)\}$")
+ax.plot(t, np.apply_along_axis(precedence, 1, x_tr).std(axis=1), label=r"$\text{std}\{\mathbf{g}^\dagger(t)\}$")
+ax.set_xlabel("Time [h]")
+ax.grid(alpha=0.2)
+ax.legend()
+plt.tight_layout()
+plt.savefig("../fig/precedence.pdf", bbox_inches="tight")
+plt.show(block=False) 
+
+# Availability and aggregate power
+fig, ax = plt.subplots(figsize=(plts["fig_width"], 0.5*plts["fig_width"]))
+ax.plot(t, x_eg["power"][:,ret_i], label=r"$p_\ell(t)$")
+ax.plot(t, x_tr["power"][:,ret_i], label=r"$p^\dagger_\ell(t)$")
+ax.plot(t, x_eg["power"].sum(1), color="k", linestyle="--", linewidth=0.5, 
+        label="$\sum_{i \in \mathcal{N}} p_i(t)$")
+ax.set_ylabel("Power [kW]")
+ax.set_xlabel("Time [h]")
+ax.grid(alpha=0.2)
+ax.legend()
+plt.tight_layout()
+plt.savefig("../fig/aggregate_power.pdf", bbox_inches="tight")
+plt.show(block=False)
+
+# # # State
+# # is_active_view = 1 - y[:,IS_ACTIVE_INDICES]
+# # is_active_view[is_active_view == 0] = np.nan
+# # axs[4].plot(t, np.arange(NUM_AGENTS) * is_active_view, color="k", linewidth=2)
+# # axs[4].set_ylabel("$i \in \mathcal{C}$")
+
+# plt.tight_layout()
+# plt.savefig("../fig/results.pdf", bbox_inches="tight")
+# plt.show(block=False) 
