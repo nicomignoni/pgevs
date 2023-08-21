@@ -4,7 +4,10 @@ from datetime import datetime
 
 import numpy as np
 import pandas as pd
-from model import EvolutionaryDynamic, UniformDynamic
+
+from model import System, EvolutionaryDynamic, UniformDynamic
+
+np.random.seed(2023)
 
 NUM_RUNS = 1
 CONFIG_PATH = "config/params.json"
@@ -38,9 +41,9 @@ for i in range(NUM_RUNS):
     print(f"{datetime.now().strftime('%d-%m-%Y %H:%M:%S')} - Running {i+1}-th simulation...", end=" ")
 
     # Sample EVs and CSs data
-    settings["init_frac_evs"] = np.random.rand()
-    num_init_evs = int((1 - settings["init_frac_evs"]) * settings["num_cs"])
-    empty_css_indices = np.random.randint(0, settings["num_cs"], num_init_evs)
+    settings["init_frac_empty_css"] = 1 # np.random.rand()
+    num_init_empty_css = int(settings["init_frac_empty_css"] * settings["num_cs"])
+    empty_css_indices = np.random.randint(0, settings["num_cs"], num_init_empty_css)
     x_df = get_evs_sample(settings["num_cs"], evs_df, css_df, settings)
     x_df.iloc[empty_css_indices] = 0
 
@@ -51,14 +54,7 @@ for i in range(NUM_RUNS):
 
     # Initial values
     init_x = np.array(x_df.to_records(index=False))
-    init_power_alloc = np.divide(
-        settings["avail"], 
-        init_x["is_active"][:-1].sum(),
-        where=init_x["is_active"][:-1]==1,
-        out=np.zeros(settings["num_cs"])
-    ) 
-    init_x["power"][:-1] = np.minimum(init_power_alloc, init_x["max_power"][:-1])
-    init_x["power"][-1] = settings["avail"] - init_x["power"][:-1].sum()
+    init_x["power"] = System.uniform_power_allocation(init_x, settings)
 
     # Instantiate dynamics
     edyn = EvolutionaryDynamic(init_x, settings)

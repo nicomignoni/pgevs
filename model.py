@@ -1,11 +1,10 @@
 import numpy as np
 
-
 class System:
     fields = [
-        ('max_output', '<f8'), ('power', '<f8'), ('max_input', '<f8'), ('max_soc', '<f8'), 
-        ('soc', '<f8'), ('alpha', '<f8'), ('epsilon', '<f8'), ('eta', '<f8'), ('gamma', '<f8'), 
-        ('mu', '<f8'), ('sigma', '<f8'), ('is_active', '<f8'), ('max_power', '<f8')
+        ('max_output', '<f4'), ('power', '<f4'), ('max_input', '<f4'), ('max_soc', '<f4'), 
+        ('soc', '<f4'), ('alpha', '<f4'), ('epsilon', '<f4'), ('eta', '<f4'), ('gamma', '<f4'), 
+        ('mu', '<f4'), ('sigma', '<f4'), ('is_active', '<f4'), ('max_power', '<f4')
     ]
 
     def __init__(self, init_x, settings):
@@ -54,6 +53,32 @@ class System:
             self.x["soc"][k,:-1] < self.x["max_soc"][k,:-1]
         )
 
+    @staticmethod
+    def uniform_power_allocation(x, settings):
+        # power = np.zeros(settings["num_cs"]+1)
+        # power[-1] = settings["avail"]
+        # while True:
+        #     condition = np.logical_and(x["is_active"][:-1], x["max_soc"][:-1] > 0)
+        #     uniform_allocation = np.divide(
+        #         power[-1], 
+        #         condition.sum(),
+        #         where=condition,
+        #         out=np.zeros(settings["num_cs"])
+        #     ) 
+        #     power[:-1] = np.minimum(power[:-1] + uniform_allocation, x["max_power"][:-1])
+        #     power[-1] -= power[:-1].sum()
+        #     if power[-1] <= 0 or np.all(power[:-1] == x["max_power"][:-1]):
+        #         return np.maximum(power, 0)
+
+        power = np.zeros(settings["num_cs"]+1)
+        power[-1] = settings["avail"]
+        sorted_indices = np.argsort(x["max_power"][:-1])
+        for k,i in enumerate(sorted_indices):
+            mean = power[-1] / (power[:-1].size - k)
+            power[i] = np.minimum(x["max_power"][i], mean)
+            power[-1] -= power[i]
+        return power
+
     # KPIs and metrics
     def collective_charging(self):
         return np.linalg.norm(self.x["max_soc"] - self.x["soc"], axis=1)**2 /\
@@ -101,17 +126,16 @@ class UniformDynamic(System):
         self.var_symbol = var_symbol
 
     def make_flow_step(self):
+        num_evs, num_active_evs = np.sum(self.x["max_soc"][self.k,:] > 0), np.sum(self.x["is_active"][self.k,:])
         self.update_css_status(self.k)
+        new_num_evs, new_num_active_evs = np.sum(self.x["max_soc"][self.k,:] > 0), np.sum(self.x["is_active"][self.k,:])
 
-        uniform_allocation = np.divide(self.s["avail"], 
-            self.x["is_active"][self.k,:-1].sum(),
-            where=self.x["is_active"][self.k,:-1]==1,
-            out=np.zeros(self.s["num_cs"])
-        ) 
-        self.x["power"][self.k+1,:-1] = np.minimum(uniform_allocation, self.x["max_power"][self.k,:-1])
-        self.x["power"][self.k+1,-1] = self.s["avail"] - self.x["power"][self.k+1,:-1].sum()
+        if new_num_evs != num_evs or new_num_active_evs != num_active_evs:
+            self.x["power"][self.k+1,:] = System.uniform_power_allocation(self.x[:][self.k,:], self.s)
+        else:
+            self.x["power"][self.k+1,:] = np.copy(self.x["power"][self.k,:])
         self.x["soc"][self.k+1,:] = self.x["soc"][self.k,:] + (self.efficiency(self.k) * self.x["power"][self.k,:]) * self.s["step_size"] 
-        
+
         # Broadcast the remaining fields to the next time step
         self.x[self.params][self.k+1,:] = np.copy(self.x[self.params][self.k,:])
 

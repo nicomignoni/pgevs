@@ -1,5 +1,5 @@
 {
-    "num_cs": 40,
+    "num_cs": 200,
     "avail": 300,
     "t_bound": 15,
     "step_size": 1e-3,

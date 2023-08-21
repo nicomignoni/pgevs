@@ -2,3 +2,4 @@ notes/*
 julia/*
 streamlit/*
 results/*
+__pycache__/*

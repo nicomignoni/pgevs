@@ -6,7 +6,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from model import EvolutionaryDynamic, UniformDynamic
 
-SIMULATIONS_PATH = "results/21-08-2023T02-12-34" # <- put the results you want to plot here
+SIMULATIONS_PATH = "results/21-08-2023T18-24-55" # <- put the results you want to plot here
 
 # Utilities
 def plot_trajectory(t, x):
@@ -61,7 +61,7 @@ for system in (edyn, udyn):
     )
     ax.plot(
         t, 100 * system.availability_utilization(), 
-        label=r"$\sum_{i \in \mathcal{C}} p" + f"{system.var_symbol}(t)$", 
+        label=r"$\sum_{i \in \mathcal{C}} p_i" + f"{system.var_symbol}(t)$", 
         color=system.color, 
         linewidth=0.9
     )
@@ -80,7 +80,7 @@ fig, ax = plt.subplots(figsize=(plts["fig_width"], 0.55*plts["fig_width"]))
 for system in (edyn, udyn):
     ax.plot(
         t, system.precedence(slice(None)).std(axis=1), 
-        label=r"$\text{std}(\mathbf{z}" + f"{system.var_symbol}(t))$",
+        label=r"$\text{std}(\mathbf{g}" + f"{system.var_symbol}(t))$",
         color=system.color, 
         linewidth=0.9
     )
