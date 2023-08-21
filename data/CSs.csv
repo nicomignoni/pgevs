@@ -1,5 +1,5 @@
-kind,max_output,power
-slow,7.0,0
-medium,22.0,0
-fast,44.0,0
-ultrafast,100.0,0
+max_output,power
+7.0,0
+22.0,0
+44.0,0
+100.0,0
