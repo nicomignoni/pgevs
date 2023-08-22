@@ -1,4 +1,5 @@
 import numpy as np
+import matplotlib.pyplot as plt
 
 class System:
     fields = [
@@ -7,12 +8,16 @@ class System:
         ('mu', '<f4'), ('sigma', '<f4'), ('is_active', '<f4'), ('max_power', '<f4')
     ]
 
-    def __init__(self, init_x, settings):
+    def __init__(self, init_x, settings, color, var_symbol):
         self.s = settings
+        self.color = color
+        self.var_symbol = var_symbol
         num_agents = self.s["num_cs"] + 1
         num_steps = int(self.s["t_bound"] / self.s["step_size"])
 
         self.k = 0
+        self.t = self.s["step_size"] * np.arange(num_steps+1) 
+
         self.x = np.zeros([num_steps+1, num_agents], dtype=System.fields)
         self.x[:][self.k,:] = init_x
 
@@ -53,46 +58,111 @@ class System:
             self.x["soc"][k,:-1] < self.x["max_soc"][k,:-1]
         )
 
+    def has_any_ev_departed(self):
+        return np.logical_and(
+            self.x["max_soc"][:-1,:] > 0, 
+            self.x["max_soc"][1:,:] == 0
+        ).any(1)
+
+    def has_any_ev_arrived(self):
+        return np.logical_and(
+            self.x["max_soc"][:-1,:] == 0, 
+            self.x["max_soc"][1:,:] > 0
+        ).any(1)
+
     @staticmethod
     def uniform_power_allocation(x, settings):
-        # power = np.zeros(settings["num_cs"]+1)
-        # power[-1] = settings["avail"]
-        # while True:
-        #     condition = np.logical_and(x["is_active"][:-1], x["max_soc"][:-1] > 0)
-        #     uniform_allocation = np.divide(
-        #         power[-1], 
-        #         condition.sum(),
-        #         where=condition,
-        #         out=np.zeros(settings["num_cs"])
-        #     ) 
-        #     power[:-1] = np.minimum(power[:-1] + uniform_allocation, x["max_power"][:-1])
-        #     power[-1] -= power[:-1].sum()
-        #     if power[-1] <= 0 or np.all(power[:-1] == x["max_power"][:-1]):
-        #         return np.maximum(power, 0)
-
         power = np.zeros(settings["num_cs"]+1)
         power[-1] = settings["avail"]
         sorted_indices = np.argsort(x["max_power"][:-1])
         for k,i in enumerate(sorted_indices):
             mean = power[-1] / (power[:-1].size - k)
-            power[i] = np.minimum(x["max_power"][i], mean)
+            power[i] = np.minimum(x["max_power"][i] * x["is_active"][i], mean)
             power[-1] -= power[i]
         return power
 
+    # Plotting utilities
+    def plot_trajectory(self, **params):
+        # Debugging, plot the power and soc trajectories for EVs only
+        fig, axs = plt.subplots(2, 1, figsize=params["figsize"], sharex=True)
+        for i,(field, y_label) in enumerate([("power", "$p_i(t)$ [kW]"), ("soc", "$b_i(t)$ [kWh]")]):
+            axs[i].plot(self.t, self.x[field][:,:-1], color="k", linewidth=0.3)
+            axs[i].set_ylabel(y_label)
+            axs[i].grid(alpha=0.2)
+        axs[-1].set_xlabel("Time (h)")
+        plt.show(block=False) 
+
+    @staticmethod
+    def plot_collective_charging(systems, **params):
+        fig = plt.figure("Collective charging", figsize=params["figsize"])
+        ax = fig.add_subplot()
+        for system in systems:
+            ax.plot( 
+                system.t, 100 * system.collective_charging, 
+                label=r"$\phi" + f"{system.var_symbol}(t)$",
+                color=system.color, 
+                linewidth=0.9
+            )
+        ax.set_xlabel("Time [h]")
+        ax.set_ylabel("[\%]")
+        ax.legend(bbox_to_anchor=(0, 1.02, 1, 0.2), loc="lower left", borderaxespad=0, ncol=4)
+        ax.grid()
+        plt.show(block=False)
+
+    @staticmethod
+    def plot_fairness(systems, **params):
+        fig = plt.figure("Fairness", figsize=params["figsize"])
+        ax = fig.add_subplot()
+        for system in systems:
+            ax.plot(
+                system.t, system.fairness, 
+                label=r"$\text{std}(\mathbf{g}" + f"{system.var_symbol}(t))$",
+                color=system.color, 
+                linewidth=0.9
+            )
+        ax.set_xlabel("Time [h]")
+        ax.set_ylabel("€")
+        ax.legend(bbox_to_anchor=(0, 1.02, 1, 0.2), loc="lower left", borderaxespad=0, ncol=4)
+        ax.grid()
+        plt.tight_layout()
+        plt.show(block=False) 
+
+    @staticmethod
+    def plot_availability_use(systems, **params):
+        fig = plt.figure("Availability", figsize=params["figsize"])
+        ax = fig.add_subplot()
+        for system in systems:
+            ax.plot(
+                system.t, 100 * system.availability_use, 
+                label=r"$\sum_{i \in \mathcal{C}} p_i" + f"{system.var_symbol}(t)$", 
+                color=system.color, 
+                linewidth=0.9
+            )
+        ax.set_xlabel("Time [h]")
+        ax.set_ylabel("[\%]")
+        ax.legend(bbox_to_anchor=(0, 1.02, 1, 0.2), loc="lower left", borderaxespad=0, ncol=4)
+        ax.grid()
+        plt.show(block=False)
+    
     # KPIs and metrics
+    @property
+    def fairness(self):
+        return self.precedence(slice(None)).std(axis=1)
+
+    @property
     def collective_charging(self):
         return np.linalg.norm(self.x["max_soc"] - self.x["soc"], axis=1)**2 /\
                np.linalg.norm(self.x["max_soc"] - self.x["soc"][0,:], axis=1)**2
 
-    def availability_utilization(self):
+    @property
+    def availability_use(self):
         return self.x["power"][:,:-1].sum(1) / self.s["avail"]
     
 
 class EvolutionaryDynamic(System):
     def __init__(self, init_x, settings, color="tab:blue", var_symbol=""):
-        super().__init__(init_x, settings)
-        self.color = color
-        self.var_symbol = var_symbol
+        super().__init__(init_x, settings, color, var_symbol)
+        self.name = self.__class__.__name__
 
     def make_flow_step(self):
         # Jump (full SoC, optimal power reallocation)
@@ -121,9 +191,7 @@ class EvolutionaryDynamic(System):
 
 class UniformDynamic(System):
     def __init__(self, init_x, settings, color="tab:orange", var_symbol="^\dagger"):
-        super().__init__(init_x, settings)
-        self.color = color
-        self.var_symbol = var_symbol
+        super().__init__(init_x, settings, color, var_symbol)
 
     def make_flow_step(self):
         num_evs, num_active_evs = np.sum(self.x["max_soc"][self.k,:] > 0), np.sum(self.x["is_active"][self.k,:])
