@@ -1,0 +1,1 @@
+julia -i --project src/main.jl
